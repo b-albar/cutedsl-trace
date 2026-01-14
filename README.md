@@ -1,10 +1,11 @@
-# cutedsl-trace
-
-Nanotrace-compatible GPU kernel tracing for CuteDSL.
+<div align="center">
+  <h1>cutedsl-trace</h1>
+  <p>GPU kernel tracing for CuteDSL.</p>
+</div>
 
 ## Overview
 
-`cutedsl-trace` provides nanosecond-resolution GPU kernel tracing for CuteDSL kernels, producing `.nanotrace` files compatible with the [nanotrace visualizer](https://aikitoria.github.io/nanotrace).
+`cutedsl-trace` provides nanosecond-resolution GPU kernel tracing for CuteDSL kernels.
 
 This library reimplements the [nanotrace-cuda](https://github.com/aikitoria/nanotrace) functionality for Python/CuteDSL kernels.
 
@@ -12,7 +13,7 @@ This library reimplements the [nanotrace-cuda](https://github.com/aikitoria/nano
 
 - **Low overhead**: Uses inline PTX assembly with vectorized stores
 - **32ns resolution**: Captures GPU global timer timestamps
-- **Nanotrace compatible**: Outputs `.nanotrace` files for the WebGPU visualizer
+- **Nanotrace compatible**: Outputs `.nanotrace` files
 - **CuteDSL native**: Integrates seamlessly with `@cute.jit` kernels
 
 ## Installation
@@ -81,7 +82,7 @@ writer.write("trace.nanotrace")
 
 ## Visualization
 
-Open the trace file at [aikitoria.github.io/nanotrace](https://aikitoria.github.io/nanotrace) or use the bundled visualizer:
+Generated files should be compatible with the [nanotrace visualizer](https://aikitoria.github.io/nanotrace). You can use the alternative visualizer provided in the `visualizer` directory.
 
 ```bash
 cd visualizer
@@ -95,24 +96,6 @@ python -m http.server 8080
 - **Named Tracks**: Custom names like "Producer", "Consumer", "Math"
 - **Zoom/Pan**: Mouse wheel to zoom, drag to pan
 - **Tooltips**: Hover over events for details
-
-### Tracing Granularity
-
-Traces can be captured at different granularities:
-
-| Level | Lanes | Use Case |
-|-------|-------|----------|
-| **Warp** | 8-32 per block | Standard profiling (1 lane per warp) |
-| **Thread** | 256+ per block | Detailed debugging (1 lane per thread sample) |
-| **Phase** | 2-4 per block | Pipeline analysis (producer/consumer/math) |
-
-See `tests/test_kernel.py` for examples of each granularity.
-
-## Roadmap
-
-- [ ] **Hierarchical expansion**: Expand warps to see individual thread traces
-- [ ] **SM-level aggregation**: Collapsed view showing SM activity
-- [ ] **Timeline filtering**: Filter by trace type or time range
 
 ## License
 
