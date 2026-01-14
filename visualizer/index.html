@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>cutedsl-trace Visualizer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1 class="logo">cutedsl-trace</h1>
+                <span class="subtitle">GPU Kernel Trace Visualizer</span>
+            </div>
+            <div class="header-right">
+                <label class="file-input-label">
+                    <input type="file" id="file-input" accept=".nanotrace" hidden>
+                    <span class="btn btn-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="17,8 12,3 7,8" />
+                            <line x1="12" y1="3" x2="12" y2="15" />
+                        </svg>
+                        Open Trace
+                    </span>
+                </label>
+                <button id="zoom-in" class="btn btn-icon" title="Zoom In">+</button>
+                <button id="zoom-out" class="btn btn-icon" title="Zoom Out">−</button>
+                <button id="zoom-fit" class="btn btn-icon" title="Fit to View">⊡</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Sidebar with block/track tree -->
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-header">
+                    <h2>Trace Structure</h2>
+                </div>
+                <div class="tree-container" id="tree-container">
+                    <p class="placeholder-text">Load a .nanotrace file to view</p>
+                </div>
+            </aside>
+
+            <!-- Timeline View -->
+            <div class="timeline-container" id="timeline-container">
+                <div class="timeline-header" id="timeline-header">
+                    <canvas id="ruler-canvas"></canvas>
+                </div>
+                <div class="timeline-body" id="timeline-body">
+                    <div class="timeline-canvas-container" id="canvas-container">
+                        <canvas id="timeline-canvas"></canvas>
+                    </div>
+                </div>
+
+                <!-- Empty State -->
+                <div class="empty-state" id="empty-state">
+                    <div class="empty-state-icon">📊</div>
+                    <h2>No Trace Loaded</h2>
+                    <p>Click "Open Trace" or drag and drop a .nanotrace file</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- Tooltip -->
+        <div class="tooltip" id="tooltip" style="display: none;">
+            <div class="tooltip-header" id="tooltip-header"></div>
+            <div class="tooltip-body" id="tooltip-body"></div>
+        </div>
+
+        <!-- Info Overlay (bottom-right corner) -->
+        <div class="info-overlay" id="info-overlay" style="display: none;">
+            <div class="info-overlay-row">
+                <span class="info-label" id="info-kernel">No trace</span>
+            </div>
+            <div class="info-overlay-row">
+                <span class="info-label">Duration:</span>
+                <span class="info-value" id="info-duration">-</span>
+            </div>
+            <div class="info-overlay-row">
+                <span class="info-label">Grid:</span>
+                <span class="info-value" id="info-grid">-</span>
+                <span class="info-separator">|</span>
+                <span class="info-label">Cluster:</span>
+                <span class="info-value" id="info-cluster">-</span>
+            </div>
+            <div class="info-overlay-row">
+                <span class="info-label">SMs:</span>
+                <span class="info-value" id="info-sms">-</span>
+                <span class="info-separator">|</span>
+                <span class="info-label">Blocks:</span>
+                <span class="info-value" id="info-blocks">-</span>
+                <span class="info-separator">|</span>
+                <span class="info-label">Zones:</span>
+                <span class="info-value" id="info-events">-</span>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <footer class="status-bar">
+            <span id="status-text">Ready</span>
+            <span id="trace-info"></span>
+            <span id="cursor-time"></span>
+        </footer>
+    </div>
+
+    <script src="parser.js?v=26"></script>
+    <script src="renderer.js?v=26"></script>
+    <script src="app.js?v=26"></script>
+</body>
+
+</html>
