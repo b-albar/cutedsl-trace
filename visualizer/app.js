@@ -130,7 +130,8 @@ class TraceVisualizerApp {
             const buffer = await file.arrayBuffer();
 
             this.setStatus('Parsing...', true);
-            const trace = this.parser.parse(buffer);
+            const trace = await this.parser.parse(buffer);
+
 
             this.trace = trace;
 
@@ -160,7 +161,9 @@ class TraceVisualizerApp {
             // Update UI
             this.emptyState.classList.add('hidden');
             this.updateVisibleTrackIndices();
+            console.time('Building tree');
             this.buildTree();
+            console.timeEnd('Building tree');
             this.updateTraceInfo();
 
             this.setStatus('Ready');
@@ -221,6 +224,7 @@ class TraceVisualizerApp {
      * Build tree view in sidebar - SM → Block → Warp hierarchy
      */
     buildTree() {
+        console.log(`Building tree for ${this.trace.tracks.length} tracks...`);
         this.treeContainer.innerHTML = '';
 
         // Group tracks by SM, then by Block

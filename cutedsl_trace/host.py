@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, BinaryIO
 
 import numpy as np
+import torch
 
 from .types import (
     TraceType,
@@ -108,11 +109,10 @@ class StaticTraceBuilder:
     def _allocate_buffer(self, total_bytes: int) -> None:
         """Allocate GPU buffer for trace data."""
         try:
-            # Try using numba CUDA
-            from numba import cuda
+            import torch
 
-            self._buffer = cuda.device_array(total_bytes, dtype=np.uint8)
-        except ImportError:
+            self._buffer = torch.zeros(total_bytes, dtype=torch.uint8, device="cuda")
+        except (ImportError, RuntimeError):
             # Fallback to numpy (for testing without GPU)
             self._buffer = np.zeros(total_bytes, dtype=np.uint8)
 
@@ -150,34 +150,17 @@ class StaticTraceBuilder:
         Call this after warmup runs and before the traced run to ensure
         clean trace data without cold-start artifacts.
         """
-        try:
-            from numba import cuda
-
-            if isinstance(self._buffer, cuda.devicearray.DeviceNDArray):
-                self._buffer.copy_to_host()[:] = 0
-                cuda.to_device(
-                    np.zeros(len(self._buffer), dtype=np.uint8), to=self._buffer
-                )
-            else:
-                self._buffer[:] = 0
-        except ImportError:
+        if hasattr(self._buffer, "fill_"):
+            self._buffer.fill_(0)
+        else:
             self._buffer[:] = 0
 
     def copy_to_host(self) -> np.ndarray:
-        """Copy GPU buffer to host memory.
-
-        Returns:
-            np.ndarray: Host copy of the trace buffer
-        """
-        try:
-            from numba import cuda
-
-            if isinstance(self._buffer, cuda.devicearray.DeviceNDArray):
-                self._host_buffer = self._buffer.copy_to_host()
-            else:
-                self._host_buffer = self._buffer.copy()
-        except ImportError:
-            self._host_buffer = self._buffer.copy()
+        """Copy data back to host."""
+        if hasattr(self._buffer, "cpu"):
+            self._host_buffer = self._buffer.cpu().detach().numpy()
+        else:
+            self._host_buffer = np.asarray(self._buffer).copy()
 
         return self._host_buffer
 
@@ -231,12 +214,7 @@ class DynamicTraceBuilder:
 
     def _allocate_buffer(self, total_bytes: int) -> None:
         """Allocate GPU buffer."""
-        try:
-            from numba import cuda
-
-            self._buffer = cuda.device_array(total_bytes, dtype=np.uint8)
-        except ImportError:
-            self._buffer = np.zeros(total_bytes, dtype=np.uint8)
+        self._buffer = torch.zeros(total_bytes, dtype=torch.uint8, device="cuda")
 
     def get_handle(self) -> TraceTensorHandle:
         """Get handle to pass to kernel."""
@@ -257,29 +235,17 @@ class DynamicTraceBuilder:
 
     def reset(self) -> None:
         """Reset the trace buffer to zeros."""
-        try:
-            from numba import cuda
-
-            if isinstance(self._buffer, cuda.devicearray.DeviceNDArray):
-                cuda.to_device(
-                    np.zeros(len(self._buffer), dtype=np.uint8), to=self._buffer
-                )
-            else:
-                self._buffer[:] = 0
-        except ImportError:
+        if hasattr(self._buffer, "fill_"):
+            self._buffer.fill_(0)
+        else:
             self._buffer[:] = 0
 
     def copy_to_host(self) -> np.ndarray:
         """Copy GPU buffer to host memory."""
-        try:
-            from numba import cuda
-
-            if isinstance(self._buffer, cuda.devicearray.DeviceNDArray):
-                self._host_buffer = self._buffer.copy_to_host()
-            else:
-                self._host_buffer = self._buffer.copy()
-        except ImportError:
-            self._host_buffer = self._buffer.copy()
+        if hasattr(self._buffer, "cpu"):
+            self._host_buffer = self._buffer.cpu().detach().numpy()
+        else:
+            self._host_buffer = np.asarray(self._buffer).copy()
 
         return self._host_buffer
 
@@ -705,17 +671,8 @@ class TraceWriter:
 
         # Log statistics
         total_events = sum(len(t.events) for t in all_tracks)
-        print(f"Trace written to {filename}")
-        print(f"  Blocks: {len(all_blocks)}")
-        print(f"  Tracks: {len(all_tracks)}")
-        print(f"  Events: {total_events}")
         if total_events > 0:
-            max_duration = max(
-                max(e.time_offset_ns + e.duration_ns for e in t.events)
-                for t in all_tracks
-                if t.events
-            )
-            print(f"  Duration: {max_duration / 1e6:.3f} ms")
+            pass
 
     def _write_header(self, f: BinaryIO, compress: bool) -> None:
         """Write file header (uncompressed)."""

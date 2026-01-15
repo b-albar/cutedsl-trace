@@ -13,7 +13,7 @@ class NanotraceParser {
      * @param {ArrayBuffer} buffer - The file contents
      * @returns {Object} Parsed trace data
      */
-    parse(buffer) {
+    async parse(buffer) {
         const view = new DataView(buffer);
         const decoder = new TextDecoder('utf-8');
         let offset = 0;
@@ -35,7 +35,7 @@ class NanotraceParser {
         let payload;
         if (compressed) {
             const compressedData = new Uint8Array(buffer, offset);
-            payload = this.decompress(compressedData);
+            payload = await this.decompress(compressedData);
         } else {
             payload = new Uint8Array(buffer, offset);
         }
@@ -44,15 +44,52 @@ class NanotraceParser {
     }
 
     /**
-     * Decompress deflate data using pako
+     * Decompress deflate data using pako or DecompressionStream
      */
-    decompress(data) {
+    async decompress(data) {
         // Use pako for decompression if available
         if (typeof pako !== 'undefined') {
-            return pako.inflate(data);
+            try {
+                return pako.inflate(data);
+            } catch (e) {
+                console.warn('Pako decompression failed, trying fallback:', e);
+            }
         }
+
         // Fallback: try DecompressionStream (modern browsers)
-        throw new Error('Compressed traces require pako library. Include pako.min.js or use uncompressed traces.');
+        if (typeof DecompressionStream !== 'undefined') {
+            try {
+                // Try as zlib (deflate with header)
+                const ds = new DecompressionStream('deflate');
+                const stream = new ReadableStream({
+                    start(controller) {
+                        controller.enqueue(data);
+                        controller.close();
+                    }
+                }).pipeThrough(ds);
+                const response = new Response(stream);
+                const decompressed = await response.arrayBuffer();
+                return new Uint8Array(decompressed);
+            } catch (e) {
+                console.warn('DecompressionStream (deflate) failed, trying deflate-raw:', e);
+                try {
+                    const ds = new DecompressionStream('deflate-raw');
+                    const stream = new ReadableStream({
+                        start(controller) {
+                            controller.enqueue(data);
+                            controller.close();
+                        }
+                    }).pipeThrough(ds);
+                    const response = new Response(stream);
+                    const decompressed = await response.arrayBuffer();
+                    return new Uint8Array(decompressed);
+                } catch (e2) {
+                    throw new Error('All decompression methods failed. The trace file might be corrupted.');
+                }
+            }
+        }
+
+        throw new Error('Compressed traces require pako library (pako.min.js) or a modern browser with DecompressionStream.');
     }
 
     /**

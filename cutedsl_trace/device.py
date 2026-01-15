@@ -30,6 +30,14 @@ from .types import TraceTensorHandle, LaneContext, DynamicLaneContext
 # =============================================================================
 
 
+def _get_ir(v, loc, ip):
+    """Helper to extract IR value from various types (Int32, raw IR, etc.)"""
+    if hasattr(v, "ir_value"):
+        return v.ir_value(loc=loc, ip=ip)
+    # If it's a raw python int or something else, wrap it in Int32 first
+    return Int32(v).ir_value(loc=loc, ip=ip)
+
+
 @dsl_user_op
 def read_globaltimer_lo(*, loc=None, ip=None) -> Int32:
     """Read the low 32-bit portion of the global timer.
@@ -99,7 +107,7 @@ def store_global_wt_v2_u32(
     ptr_int = ptr.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
     llvm.inline_asm(
         None,
-        [ptr_int, v0.ir_value(loc=loc, ip=ip), v1.ir_value(loc=loc, ip=ip)],
+        [ptr_int, _get_ir(v0, loc, ip), _get_ir(v1, loc, ip)],
         "st.global.wt.v2.u32 [$0], {$1, $2};",
         "l,r,r",
         has_side_effects=True,
@@ -127,15 +135,17 @@ def store_global_wt_v4_u32(
         ptr: Pointer to write location (must be 16-byte aligned)
         v0-v3: Values to store
     """
+
     ptr_int = ptr.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
+
     llvm.inline_asm(
         None,
         [
             ptr_int,
-            v0.ir_value(loc=loc, ip=ip),
-            v1.ir_value(loc=loc, ip=ip),
-            v2.ir_value(loc=loc, ip=ip),
-            v3.ir_value(loc=loc, ip=ip),
+            _get_ir(v0, loc, ip),
+            _get_ir(v1, loc, ip),
+            _get_ir(v2, loc, ip),
+            _get_ir(v3, loc, ip),
         ],
         "st.global.wt.v4.u32 [$0], {$1, $2, $3, $4};",
         "l,r,r,r,r",
@@ -173,14 +183,14 @@ def store_global_wt_v8_u32(
         None,
         [
             ptr_int,
-            v0.ir_value(loc=loc, ip=ip),
-            v1.ir_value(loc=loc, ip=ip),
-            v2.ir_value(loc=loc, ip=ip),
-            v3.ir_value(loc=loc, ip=ip),
-            v4.ir_value(loc=loc, ip=ip),
-            v5.ir_value(loc=loc, ip=ip),
-            v6.ir_value(loc=loc, ip=ip),
-            v7.ir_value(loc=loc, ip=ip),
+            _get_ir(v0, loc, ip),
+            _get_ir(v1, loc, ip),
+            _get_ir(v2, loc, ip),
+            _get_ir(v3, loc, ip),
+            _get_ir(v4, loc, ip),
+            _get_ir(v5, loc, ip),
+            _get_ir(v6, loc, ip),
+            _get_ir(v7, loc, ip),
         ],
         "st.global.wt.v8.u32 [$0], {$1, $2, $3, $4, $5, $6, $7, $8};",
         "l,r,r,r,r,r,r,r,r",
@@ -268,14 +278,10 @@ def begin_lane_dynamic_raw(
     )
     write_offset_bytes = base_offset_bytes + DynamicLaneContext.EVENT_WIDTH_BYTES
 
-    actual_enabled = enabled
-    if const_expr(is_tracing_disabled()):
-        actual_enabled = False
-
     return DynamicLaneContext(
         base_offset_bytes=base_offset_bytes,
         write_offset_bytes=write_offset_bytes,
-        enabled=actual_enabled,
+        enabled=enabled,
     )
 
 
@@ -460,6 +466,27 @@ def end_event_dynamic_raw_0(
         if lane.write_offset_bytes < max_offset:
             ptr = buffer.iterator + lane.write_offset_bytes
             store_global_wt_v4_u32(ptr, start_time, end_time, format_id, Int32(0))
+        lane.advance()
+    return lane
+
+
+@cute.jit
+def end_event_dynamic_raw_1(
+    start_time: Int32,
+    buffer: cute.Tensor,
+    row_stride_bytes: Int32,
+    lane: DynamicLaneContext,
+    format_id: Int32,
+    p0: Int32,
+) -> DynamicLaneContext:
+    if const_expr(is_tracing_disabled()):
+        return lane
+    if lane.enabled:
+        end_time = read_globaltimer_lo()
+        max_offset = lane.base_offset_bytes + row_stride_bytes
+        if lane.write_offset_bytes < max_offset:
+            ptr = buffer.iterator + lane.write_offset_bytes
+            store_global_wt_v4_u32(ptr, start_time, end_time, format_id, p0)
         lane.advance()
     return lane
 
