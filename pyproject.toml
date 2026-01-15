@@ -39,7 +39,7 @@ dev = [
 "Bug Tracker" = "https://github.com/b-albar/cutedsl-trace/issues"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["cutedsl_trace"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
