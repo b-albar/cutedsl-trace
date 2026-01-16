@@ -213,6 +213,33 @@ class TimelineRenderer {
     }
 
     /**
+     * Set the visible rows (tracks and headers)
+     * @param {Array<{type: string, trackIdx?: number, label?: string, depth?: number}>} rows
+     */
+    setRows(rows) {
+        this.rows = rows;
+        this.requestRender();
+    }
+
+    /**
+     * Get the absolute Y position for a track
+     */
+    getTrackAbsY(trackIdx) {
+        if (!this.rows) return 0;
+        const row = this.rows.findIndex(r => r.type === 'track' && r.trackIdx === trackIdx);
+        if (row === -1) return 0;
+        return row * (this.layout.trackHeight + this.layout.trackGap);
+    }
+
+    /**
+     * Get the total content height
+     */
+    get totalHeight() {
+        const numRows = this.rows ? this.rows.length : (this.tracks ? this.tracks.length : 0);
+        return numRows * (this.layout.trackHeight + this.layout.trackGap);
+    }
+
+    /**
      * Build spatial index for fast event lookups
      * Uses a simplified approach: sort events by start time per track
      */
@@ -406,10 +433,10 @@ class TimelineRenderer {
     }
 
     /**
-     * Get track Y coordinate
+     * Get track Y coordinate from row index
      */
-    trackToY(trackIdx) {
-        return trackIdx * (this.layout.trackHeight + this.layout.trackGap) - this.viewState.offsetY;
+    rowToY(rowIndex) {
+        return rowIndex * (this.layout.trackHeight + this.layout.trackGap) - this.viewState.offsetY;
     }
 
     /**
@@ -454,19 +481,24 @@ class TimelineRenderer {
         // Use raw events if each would be at least minEventWidth pixels
         const useAggregation = pixelsPerNs < this.layout.aggregateThreshold / 1000;
 
-        // Determine visible tracks (based on visibility and viewport)
-        const numVisibleTracks = this.visibleTrackIndices ? this.visibleTrackIndices.length : this.tracks.length;
+        // Determine visible rows
+        const rows = this.rows || this.tracks.map((_, i) => ({ type: 'track', trackIdx: i }));
+        const numRows = rows.length;
         const firstVisibleRow = Math.max(0, Math.floor(this.viewState.offsetY / (this.layout.trackHeight + this.layout.trackGap)));
         const lastVisibleRow = Math.min(
-            numVisibleTracks - 1,
+            numRows - 1,
             Math.ceil((this.viewState.offsetY + height) / (this.layout.trackHeight + this.layout.trackGap))
         );
 
-        // Render tracks (using visibleTrackIndices if available)
-        for (let row = firstVisibleRow; row <= lastVisibleRow; row++) {
-            const trackIdx = this.visibleTrackIndices ? this.visibleTrackIndices[row] : row;
-            if (trackIdx === undefined) continue;
-            this.renderTrackAtRow(ctx, trackIdx, row, visibleStartTime, visibleEndTime, pixelsPerNs, useAggregation);
+        // Render rows
+        for (let r = firstVisibleRow; r <= lastVisibleRow; r++) {
+            this.renderRow(ctx, rows[r], r, visibleStartTime, visibleEndTime, pixelsPerNs, useAggregation);
+        }
+
+        // Render hover highlights
+        this.renderRowHighlight(ctx);
+        if (this.hoveredEvent) {
+            this.renderHoverHighlight(ctx);
         }
 
         // Render ruler
@@ -481,30 +513,64 @@ class TimelineRenderer {
     }
 
     /**
-     * Render a single track at a specific row position
-     * @param {number} trackIdx - Original track index in trace data
-     * @param {number} row - Visual row number for positioning
+     * Render a single row (track or header)
      */
-    renderTrackAtRow(ctx, trackIdx, row, visibleStartTime, visibleEndTime, pixelsPerNs, useAggregation) {
-        const track = this.tracks[trackIdx];
-        const y = row * (this.layout.trackHeight + this.layout.trackGap) - this.viewState.offsetY;
+    renderRow(ctx, rowData, rowIdx, visibleStartTime, visibleEndTime, pixelsPerNs, useAggregation) {
+        const y = rowIdx * (this.layout.trackHeight + this.layout.trackGap) - this.viewState.offsetY;
         const h = this.layout.trackHeight;
+        const w = this.cssWidth || this.canvas.width;
 
         // Skip if not visible
         if (y + h < 0 || y > this.canvas.height) return;
 
-        // Draw track background
-        ctx.fillStyle = row % 2 === 0 ? this.colors.trackBg : this.colors.trackBgAlt;
-        ctx.fillRect(0, y, this.canvas.width, h);
+        if (rowData.type === 'header') {
+            // Draw Header
+            if (rowData.subtype === 'sm') {
+                ctx.fillStyle = '#21262d'; // --bg-tertiary
+                ctx.fillRect(0, y, w, h);
+                ctx.fillStyle = '#30363d';
+                ctx.fillRect(0, y + h - 1, w, 1);
+            } else if (rowData.subtype === 'block') {
+                ctx.fillStyle = 'rgba(88, 166, 255, 0.05)';
+                ctx.fillRect(0, y, w, h);
+                ctx.fillStyle = '#30363d';
+                ctx.globalAlpha = 0.3;
+                ctx.fillRect(0, y + h - 1, w, 1);
+                ctx.globalAlpha = 1.0;
+            }
 
-        // Get events to render
-        let eventsToRender;
-        if (useAggregation) {
-            eventsToRender = this.getAggregatedEvents(trackIdx, visibleStartTime, visibleEndTime, pixelsPerNs);
-            this.renderAggregatedEvents(ctx, eventsToRender, y, h, pixelsPerNs, track);
-        } else {
-            eventsToRender = this.findEventsInRange(trackIdx, visibleStartTime, visibleEndTime);
-            this.renderEvents(ctx, eventsToRender, y, h, pixelsPerNs, track);
+            // Add subtle label on the timeline itself to help orientation
+            if (rowData.label) {
+                ctx.fillStyle = 'rgba(139, 148, 158, 0.4)'; // Subdued color
+                ctx.font = '500 10px -apple-system, sans-serif';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(rowData.label, 8, y + h / 2);
+            }
+
+        } else if (rowData.type === 'track') {
+            // Draw Track
+            const trackIdx = rowData.trackIdx;
+
+            // Draw track background
+            ctx.fillStyle = rowIdx % 2 === 0 ? this.colors.trackBg : this.colors.trackBgAlt;
+            ctx.fillRect(0, y, w, h);
+
+            // Draw track border bottom (separator for alignment)
+            ctx.fillStyle = this.colors.border;
+            ctx.globalAlpha = 0.2;
+            ctx.fillRect(0, y + h + this.layout.trackGap - 1, w, 1);
+            ctx.globalAlpha = 1.0;
+
+            // Get events to render
+            let eventsToRender;
+            if (useAggregation) {
+                eventsToRender = this.getAggregatedEvents(trackIdx, visibleStartTime, visibleEndTime, pixelsPerNs);
+                this.renderAggregatedEvents(ctx, eventsToRender, y, h, pixelsPerNs, this.tracks[trackIdx]);
+            } else {
+                eventsToRender = this.findEventsInRange(trackIdx, visibleStartTime, visibleEndTime);
+                this.renderEvents(ctx, eventsToRender, y, h, pixelsPerNs, this.tracks[trackIdx]);
+            }
         }
     }
 
@@ -639,15 +705,35 @@ class TimelineRenderer {
     }
 
     /**
-     * Render hover highlight
+     * Render row-wide hover highlight
+     */
+    renderRowHighlight(ctx) {
+        if (this.hoveredRowIdx === null || this.hoveredRowIdx === undefined) return;
+
+        const y = this.rowToY(this.hoveredRowIdx);
+        const h = this.layout.trackHeight;
+        const w = this.cssWidth || this.canvas.width;
+
+        ctx.fillStyle = 'rgba(139, 148, 158, 0.15)';
+        ctx.fillRect(0, y, w, h);
+    }
+
+    /**
+     * Render hover highlight for an event
      */
     renderHoverHighlight(ctx) {
         const e = this.hoveredEvent;
+        if (!e) return;
+
         const trackIdx = this.hoveredTrack;
+
+        // Find row for this track
+        const row = this.rows ? this.rows.findIndex(r => r.type === 'track' && r.trackIdx === trackIdx) : trackIdx;
+        if (row === -1) return;
 
         const x = this.timeToX(e.start);
         const w = Math.max(e.event.duration * this.viewState.scale, 2);
-        const y = this.trackToY(trackIdx);
+        const y = this.rowToY(row);
         const h = this.layout.trackHeight;
 
         // Draw highlight border
@@ -686,30 +772,37 @@ class TimelineRenderer {
         // Draw ticks
         ctx.fillStyle = this.colors.rulerText;
         ctx.font = '10px -apple-system, sans-serif';
-        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle'; // Keep textBaseline as it was in the original
 
         const visibleStartTime = this.xToTime(0);
         const visibleEndTime = this.xToTime(width);
         const firstTick = Math.ceil(visibleStartTime / interval) * interval;
 
-        // Draw border
+        // Draw border bottom
         ctx.strokeStyle = this.colors.border;
         ctx.beginPath();
-        ctx.moveTo(0, height - 0.5);
-        ctx.lineTo(width, height - 0.5);
+        ctx.moveTo(0, height - 1);
+        ctx.lineTo(width, height - 1);
         ctx.stroke();
 
         for (let t = firstTick; t <= visibleEndTime; t += interval) {
-            const x = this.timeToX(t);
+            const x = this.timeToX(t) + 5; // Small offset to avoid border overlap
+            if (x < 5 || x > width) continue;
 
-            // Draw tick
+            // Tick mark
             ctx.fillStyle = this.colors.border;
             ctx.fillRect(x, height - 8, 1, 8);
 
-            // Draw label
+            // Time label - adjust alignment for edge ticks to prevent cutting off
             ctx.fillStyle = this.colors.rulerText;
-            const label = this.formatTime(t - this.trace.timeRange.min);
-            ctx.fillText(label, x, height - 12);
+            if (x < 35) {
+                ctx.textAlign = 'left';
+            } else if (x > width - 30) {
+                ctx.textAlign = 'right';
+            } else {
+                ctx.textAlign = 'center';
+            }
+            ctx.fillText(this.formatTime(t - this.trace.timeRange.min), x, height - 12);
         }
     }
 
@@ -761,50 +854,58 @@ class TimelineRenderer {
         this.viewState.offsetX = Math.max(0, this.viewState.offsetX);
         this.viewState.offsetY = Math.max(0, this.viewState.offsetY);
 
-        const numTracks = this.visibleTrackIndices ? this.visibleTrackIndices.length : this.tracks.length;
-        const maxY = numTracks * (this.layout.trackHeight + this.layout.trackGap) - this.canvas.height;
-        this.viewState.offsetY = Math.min(Math.max(0, maxY), this.viewState.offsetY);
+        const numRows = this.rows ? this.rows.length : (this.tracks ? this.tracks.length : 0);
+        const maxY = numRows * (this.layout.trackHeight + this.layout.trackGap) - this.canvas.height;
+
+        // Allow scrolling
+        this.viewState.offsetY = Math.max(0, Math.min(Math.max(0, maxY), this.viewState.offsetY));
 
         this.requestRender();
     }
 
     /**
-     * Find event at pixel coordinates
+     * Perform hit test at pixel coordinates
      */
     hitTest(x, y) {
-        if (!this.trace) return null;
+        if (!this.rows) return null;
 
-        // Find row (visual position)
+        // Find which row (visual position) was clicked
         const row = Math.floor((y + this.viewState.offsetY) / (this.layout.trackHeight + this.layout.trackGap));
-        const numTracks = this.visibleTrackIndices ? this.visibleTrackIndices.length : this.tracks.length;
-        if (row < 0 || row >= numTracks) return null;
+        if (row < 0 || row >= this.rows.length) return null;
 
-        // Get actual track index from row
-        const trackIdx = this.visibleTrackIndices ? this.visibleTrackIndices[row] : row;
-        if (trackIdx === undefined) return null;
+        const rowData = this.rows[row];
 
-        // Find time
-        const time = this.xToTime(x);
+        // Return row information regardless of track type (for highlighting)
+        const hit = { rowIndex: row };
 
-        // Find events at this time
-        const events = this.findEventsInRange(trackIdx, time, time);
+        if (rowData.type === 'track') {
+            const trackIdx = rowData.trackIdx;
+            const time = this.xToTime(x);
+            const events = this.findEventsInRange(trackIdx, time, time);
 
-        // Return the most specific one (minimum duration) containing the time
-        // This ensures detail events are prioritized over container events like loop iterations
-        let bestMatch = null;
-        let minDuration = Infinity;
+            // Find the most specific event (minimum duration) containing the time
+            let bestMatch = null;
+            let minDuration = Infinity;
 
-        for (const e of events) {
-            if (e.start <= time && e.end >= time) {
-                const duration = e.end - e.start;
-                if (duration < minDuration) {
-                    minDuration = duration;
-                    bestMatch = e;
+            for (const e of events) {
+                if (e.start <= time && e.end >= time) {
+                    const duration = e.end - e.start;
+                    if (duration < minDuration) {
+                        minDuration = duration;
+                        bestMatch = e;
+                    }
                 }
+            }
+
+            if (bestMatch) {
+                hit.event = bestMatch;
+                hit.trackIdx = trackIdx;
+            } else {
+                hit.trackIdx = trackIdx;
             }
         }
 
-        return bestMatch ? { trackIdx, row, event: bestMatch } : null;
+        return hit;
     }
 
     /**

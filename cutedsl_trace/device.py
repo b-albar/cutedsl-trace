@@ -492,6 +492,42 @@ def end_event_dynamic_raw_1(
 
 
 @cute.jit
+def end_event_dynamic_raw_2(
+    start_time: Int32,
+    buffer: cute.Tensor,
+    row_stride_bytes: Int32,
+    lane: DynamicLaneContext,
+    format_id: Int32,
+    p0: Int32,
+    p1: Int32,
+) -> DynamicLaneContext:
+    """Record an event with 2 parameters (raw buffer version).
+
+    Used for page management tracing where p0=op_idx and p1=page_mask.
+    """
+    if const_expr(is_tracing_disabled()):
+        return lane
+    if lane.enabled:
+        end_time = read_globaltimer_lo()
+        max_offset = lane.base_offset_bytes + row_stride_bytes
+        if lane.write_offset_bytes < max_offset:
+            ptr = buffer.iterator + lane.write_offset_bytes
+            store_global_wt_v8_u32(
+                ptr,
+                start_time,
+                end_time,
+                format_id,
+                p0,
+                p1,
+                Int32(0),
+                Int32(0),
+                Int32(0),
+            )
+        lane.advance()
+    return lane
+
+
+@cute.jit
 def end_event_dynamic_0(
     start_time: Int32,
     handle: TraceTensorHandle,

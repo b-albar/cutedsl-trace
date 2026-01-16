@@ -41,9 +41,11 @@ class TraceVisualizerApp {
         this.isDragging = false;
         this.lastMouseX = 0;
         this.lastMouseY = 0;
+
+        this.collapsedSMs = new Set();     // Track which SMs are collapsed
         this.collapsedBlocks = new Set();  // Track which blocks are collapsed
         this.collapsedWarps = new Set();   // Track which warps are collapsed ("blockId-laneId")
-        this.visibleTrackIndices = [];     // Indices of visible tracks
+        this.structure = null;             // Initialized hierarchy
 
         // Bind event handlers
         this.bindEvents();
@@ -108,6 +110,14 @@ class TraceVisualizerApp {
         window.addEventListener('resize', () => this.handleResize());
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => this.handleKeyDown(e));
+
+        // Sync scroll from sidebar to timeline
+        this.treeContainer.addEventListener('scroll', () => {
+            if (this.renderer.viewState.offsetY !== this.treeContainer.scrollTop) {
+                this.renderer.viewState.offsetY = this.treeContainer.scrollTop;
+                this.renderer.requestRender();
+            }
+        });
     }
 
     /**
@@ -132,7 +142,6 @@ class TraceVisualizerApp {
             this.setStatus('Parsing...', true);
             const trace = await this.parser.parse(buffer);
 
-
             this.trace = trace;
 
             // Sort tracks by SM -> Block -> Lane
@@ -144,14 +153,21 @@ class TraceVisualizerApp {
                 return a.laneId - b.laneId;
             });
 
+            // Build hierarchy structure
+            this.buildHierarchy();
+
             // Reset collapse states
+            this.collapsedSMs.clear();
             this.collapsedBlocks.clear();
             this.collapsedWarps.clear();
 
             // Collapse all warps by default to keep threads hidden
-            for (const track of trace.tracks) {
-                if (track.level === 2) { // WARP
-                    this.collapsedWarps.add(`${track.blockId}-${track.laneId}`);
+            // Find warp keys from structure
+            for (const sm of this.structure.sms) {
+                for (const block of sm.blocks) {
+                    for (const warp of block.warps) {
+                        this.collapsedWarps.add(warp.key);
+                    }
                 }
             }
 
@@ -160,10 +176,12 @@ class TraceVisualizerApp {
 
             // Update UI
             this.emptyState.classList.add('hidden');
-            this.updateVisibleTrackIndices();
+
             console.time('Building tree');
             this.buildTree();
             console.timeEnd('Building tree');
+
+            this.updateVisibleRows();
             this.updateTraceInfo();
 
             this.setStatus('Ready');
@@ -175,31 +193,142 @@ class TraceVisualizerApp {
     }
 
     /**
-     * Update visible track indices based on collapsed blocks/warps
+     * Build the hierarchical structure of the trace
      */
-    updateVisibleTrackIndices() {
-        // Build list of visible track indices
-        this.visibleTrackIndices = [];
+    buildHierarchy() {
+        const smMap = new Map();
+
+        // Pass 1: Group tracks by SM/Block
         for (let i = 0; i < this.trace.tracks.length; i++) {
             const track = this.trace.tracks[i];
+            const smId = track.block?.smId ?? 0;
+            const blockId = track.blockId;
 
-            // Hide if block is collapsed
-            if (this.collapsedBlocks.has(track.blockId)) {
-                continue;
+            if (!smMap.has(smId)) smMap.set(smId, { id: smId, blocks: new Map(), count: 0 });
+            const smData = smMap.get(smId);
+
+            if (!smData.blocks.has(blockId)) {
+                smData.blocks.set(blockId, {
+                    id: blockId,
+                    block: track.block,
+                    tracks: [],
+                    warps: new Map() // laneId -> { track, trackIdx, threads: [] }
+                });
+                smData.count++; // Count blocks
             }
-
-            // Hide if it's a thread and its warp is collapsed
-            if (track.level === 3 && track.parentLane !== null) {
-                if (this.collapsedWarps.has(`${track.blockId}-${track.parentLane}`)) {
-                    continue;
-                }
-            }
-
-            this.visibleTrackIndices.push(i);
+            const blockData = smData.blocks.get(blockId);
+            blockData.tracks.push({ track, index: i });
         }
 
-        // Update renderer with visible tracks
-        this.renderer.setVisibleTracks(this.visibleTrackIndices);
+        // Pass 2: Organize Blocks into Warps
+        const sortedSmIds = Array.from(smMap.keys()).sort((a, b) => a - b);
+        const smList = [];
+
+        for (const smId of sortedSmIds) {
+            const sm = smMap.get(smId);
+            const sortedBlockIds = Array.from(sm.blocks.keys()).sort((a, b) => a - b);
+            const blockList = [];
+
+            for (const blockId of sortedBlockIds) {
+                const block = sm.blocks.get(blockId);
+                const warpMap = new Map();
+
+                // Find warp tracks (headers)
+                for (const item of block.tracks) {
+                    const track = item.track;
+                    // Assuming level <= 2 is warp/lane header
+                    if (track.level <= 2) {
+                        warpMap.set(track.laneId, {
+                            key: `${blockId}-${track.laneId}`,
+                            laneId: track.laneId,
+                            track: item.track,
+                            trackIdx: item.index,
+                            eventCount: item.track.events.length,
+                            threads: []
+                        });
+                    }
+                }
+
+                // Associate threads
+                for (const item of block.tracks) {
+                    const track = item.track;
+                    // Assuming level == 3 is thread
+                    if (track.level === 3) {
+                        const parentLane = track.parentLane !== null ? track.parentLane : track.laneId;
+                        let warp = warpMap.get(parentLane);
+
+                        // If no parent warp found, maybe treat as its own warp?
+                        // For now assuming well-formed trace
+                        if (warp) {
+                            warp.threads.push({
+                                track: item.track,
+                                trackIdx: item.index,
+                                laneId: track.laneId,
+                                eventCount: item.track.events.length
+                            });
+                        }
+                    }
+                }
+
+                // Prepare label
+                const label = this.parser.formatLabel(
+                    block.block?.format?.label || `Block ${blockId}`,
+                    { blockId }
+                );
+
+                blockList.push({
+                    id: blockId,
+                    label: label,
+                    trackCount: block.tracks.length,
+                    warps: Array.from(warpMap.values()).sort((a, b) => a.laneId - b.laneId)
+                });
+            }
+
+            smList.push({
+                id: smId,
+                blocks: blockList
+            });
+        }
+
+        this.structure = { sms: smList };
+    }
+
+    /**
+     * Update visible rows and notify renderer
+     */
+    updateVisibleRows() {
+        if (!this.structure) return;
+
+        const rows = [];
+
+        for (const sm of this.structure.sms) {
+            // SM Header
+            rows.push({ type: 'header', subtype: 'sm', label: `SM ${sm.id} (${sm.blocks.length} blocks)` });
+
+            if (this.collapsedSMs.has(sm.id)) continue;
+
+            for (const block of sm.blocks) {
+                // Block Header
+                rows.push({ type: 'header', subtype: 'block', label: `${block.label}` });
+
+                if (this.collapsedBlocks.has(block.id)) continue;
+
+                for (const warp of block.warps) {
+                    // Warp Track (Level 2)
+                    rows.push({ type: 'track', trackIdx: warp.trackIdx });
+
+                    if (this.collapsedWarps.has(warp.key)) continue;
+
+                    // Thread Tracks (Level 3)
+                    for (const thread of warp.threads) {
+                        rows.push({ type: 'track', trackIdx: thread.trackIdx });
+                    }
+                }
+            }
+        }
+
+        this.visibleRows = rows;
+        this.renderer.setRows(rows);
     }
 
     /**
@@ -213,57 +342,23 @@ class TraceVisualizerApp {
     }
 
     /**
-     * Update visible tracks after collapse/expand
-     */
-    updateVisibleTracks() {
-        this.updateVisibleTrackIndices();
-        this.renderer.requestRender();
-    }
-
-    /**
      * Build tree view in sidebar - SM → Block → Warp hierarchy
      */
     buildTree() {
-        console.log(`Building tree for ${this.trace.tracks.length} tracks...`);
+        // Clear container
         this.treeContainer.innerHTML = '';
+        if (!this.structure) return;
 
-        // Group tracks by SM, then by Block
-        const smMap = new Map(); // smId -> { blocks: Map(blockId -> { block, tracks }) }
-
-        for (let i = 0; i < this.trace.tracks.length; i++) {
-            const track = this.trace.tracks[i];
-            const smId = track.block?.smId ?? 0;
-            const blockId = track.blockId;
-
-            if (!smMap.has(smId)) {
-                smMap.set(smId, { blocks: new Map() });
-            }
-
-            const smData = smMap.get(smId);
-            if (!smData.blocks.has(blockId)) {
-                smData.blocks.set(blockId, {
-                    block: track.block,
-                    tracks: []
-                });
-            }
-            smData.blocks.get(blockId).tracks.push({ track, index: i });
-        }
-
-        // Sort SMs by ID
-        const sortedSmIds = Array.from(smMap.keys()).sort((a, b) => a - b);
-
-        // Build tree nodes for each SM
-        for (const smId of sortedSmIds) {
-            const smData = smMap.get(smId);
-
+        for (const sm of this.structure.sms) {
             const smNode = document.createElement('div');
             smNode.className = 'tree-node tree-sm';
+            if (this.collapsedSMs.has(sm.id)) smNode.classList.add('collapsed');
 
             smNode.innerHTML = `
                 <div class="tree-node-header tree-sm-header">
-                    <span class="tree-node-icon">▼</span>
-                    <span class="tree-node-label">SM ${smId}</span>
-                    <span class="tree-node-count">${smData.blocks.size} blocks</span>
+                    <span class="tree-node-icon">${this.collapsedSMs.has(sm.id) ? '▶' : '▼'}</span>
+                    <span class="tree-node-label">SM ${sm.id}</span>
+                    <span class="tree-node-count">${sm.blocks.length} blocks</span>
                 </div>
                 <div class="tree-node-children"></div>
             `;
@@ -274,28 +369,23 @@ class TraceVisualizerApp {
             smHeader.addEventListener('click', () => {
                 const isCollapsed = smNode.classList.toggle('collapsed');
                 smHeader.querySelector('.tree-node-icon').textContent = isCollapsed ? '▶' : '▼';
+
+                if (isCollapsed) this.collapsedSMs.add(sm.id);
+                else this.collapsedSMs.delete(sm.id);
+
+                this.updateVisibleRows();
             });
 
-            // Sort blocks by ID
-            const sortedBlockIds = Array.from(smData.blocks.keys()).sort((a, b) => a - b);
-
-            // Add blocks within this SM
-            for (const blockId of sortedBlockIds) {
-                const blockData = smData.blocks.get(blockId);
-
+            for (const block of sm.blocks) {
                 const blockNode = document.createElement('div');
                 blockNode.className = 'tree-node tree-block';
-
-                const blockLabel = this.parser.formatLabel(
-                    blockData.block?.format?.label || `Block ${blockId}`,
-                    { blockId }
-                );
+                if (this.collapsedBlocks.has(block.id)) blockNode.classList.add('collapsed');
 
                 blockNode.innerHTML = `
                     <div class="tree-node-header tree-block-header">
-                        <span class="tree-node-icon">▼</span>
-                        <span class="tree-node-label">${blockLabel}</span>
-                        <span class="tree-node-count">${blockData.tracks.length}</span>
+                        <span class="tree-node-icon">${this.collapsedBlocks.has(block.id) ? '▶' : '▼'}</span>
+                        <span class="tree-node-label">${block.label}</span>
+                        <span class="tree-node-count">${block.trackCount}</span>
                     </div>
                     <div class="tree-node-children"></div>
                 `;
@@ -308,108 +398,77 @@ class TraceVisualizerApp {
                     const isCollapsed = blockNode.classList.toggle('collapsed');
                     blockHeader.querySelector('.tree-node-icon').textContent = isCollapsed ? '▶' : '▼';
 
-                    if (isCollapsed) {
-                        this.collapsedBlocks.add(blockId);
-                    } else {
-                        this.collapsedBlocks.delete(blockId);
-                    }
-                    this.updateVisibleTracks();
+                    if (isCollapsed) this.collapsedBlocks.add(block.id);
+                    else this.collapsedBlocks.delete(block.id);
+
+                    this.updateVisibleRows();
                 });
 
-                // Group tracks into warps and threads
-                const warpMap = new Map();
-
-                for (const item of blockData.tracks) {
-                    const track = item.track;
-                    if (track.level <= 2) {
-                        warpMap.set(track.laneId, { ...item, threads: [] });
-                    }
-                }
-
-                for (const item of blockData.tracks) {
-                    const track = item.track;
-                    if (track.level === 3 && track.parentLane !== null) {
-                        const warp = warpMap.get(track.parentLane);
-                        if (warp) {
-                            warp.threads.push(item);
-                        }
-                    }
-                }
-
-                // Add warps within this block
-                for (const warpData of warpMap.values()) {
-                    const { track, index, threads } = warpData;
+                for (const warp of block.warps) {
                     const warpNode = document.createElement('div');
                     warpNode.className = 'tree-node tree-warp';
+                    if (this.collapsedWarps.has(warp.key) && warp.threads.length > 0) warpNode.classList.add('collapsed');
 
-                    if (threads.length > 0) {
-                        const warpKey = `${blockId}-${track.laneId}`;
-                        const isCollapsed = this.collapsedWarps.has(warpKey);
-                        if (isCollapsed) warpNode.classList.add('collapsed');
+                    const warpLabel = this.parser.formatLabel(
+                        warp.track.trackFormat?.label || `Warp ${warp.laneId}`,
+                        { laneId: warp.laneId }
+                    );
 
-                        const warpLabel = this.parser.formatLabel(
-                            track.trackFormat?.label || `Warp ${track.laneId}`,
-                            { laneId: track.laneId }
-                        );
+                    // If threads exist, it's collapsible
+                    const hasThreads = warp.threads.length > 0;
+                    const icon = hasThreads ? (this.collapsedWarps.has(warp.key) ? '▶' : '▼') : '◆';
 
-                        warpNode.innerHTML = `
-                            <div class="tree-node-header">
-                                <span class="tree-node-icon">${isCollapsed ? '▶' : '▼'}</span>
-                                <span class="tree-node-label">${warpLabel}</span>
-                                <span class="tree-node-count">${track.events.length}</span>
-                            </div>
-                            <div class="tree-node-children"></div>
-                        `;
+                    warpNode.innerHTML = `
+                        <div class="tree-node-header">
+                            <span class="tree-node-icon">${icon}</span>
+                            <span class="tree-node-label">${warpLabel}</span>
+                            <span class="tree-node-count">${warp.eventCount}</span>
+                        </div>
+                        <div class="tree-node-children"></div>
+                    `;
 
-                        const warpHeader = warpNode.querySelector('.tree-node-header');
-                        const warpIcon = warpHeader.querySelector('.tree-node-icon');
+                    const warpHeader = warpNode.querySelector('.tree-node-header');
 
+                    if (hasThreads) {
                         warpHeader.addEventListener('click', (e) => {
                             e.stopPropagation();
                             const collapsed = warpNode.classList.toggle('collapsed');
-                            warpIcon.textContent = collapsed ? '▶' : '▼';
+                            warpHeader.querySelector('.tree-node-icon').textContent = collapsed ? '▶' : '▼';
 
-                            if (collapsed) {
-                                this.collapsedWarps.add(warpKey);
-                            } else {
-                                this.collapsedWarps.delete(warpKey);
-                            }
-                            this.updateVisibleTracks();
+                            if (collapsed) this.collapsedWarps.add(warp.key);
+                            else this.collapsedWarps.delete(warp.key);
+
+                            this.updateVisibleRows();
                         });
 
                         const threadsContainer = warpNode.querySelector('.tree-node-children');
-                        for (const threadItem of threads) {
+                        for (const thread of warp.threads) {
                             const threadNode = document.createElement('div');
                             threadNode.className = 'tree-node tree-thread';
+
                             const threadLabel = this.parser.formatLabel(
-                                threadItem.track.trackFormat?.label || `Thread ${threadItem.track.laneId}`,
-                                { laneId: threadItem.track.laneId }
+                                thread.track.trackFormat?.label || `Thread ${thread.laneId}`,
+                                { laneId: thread.laneId }
                             );
+
                             threadNode.innerHTML = `
                                 <div class="tree-node-header">
                                     <span class="tree-node-icon">◆</span>
                                     <span class="tree-node-label">${threadLabel}</span>
-                                    <span class="tree-node-count">${threadItem.track.events.length}</span>
+                                    <span class="tree-node-count">${thread.eventCount}</span>
                                 </div>
                             `;
-                            threadNode.addEventListener('click', () => this.scrollToTrack(threadItem.index));
+                            threadNode.addEventListener('click', (e) => {
+                                e.stopPropagation();
+                                this.scrollToTrack(thread.trackIdx);
+                            });
                             threadsContainer.appendChild(threadNode);
                         }
                     } else {
-                        const warpLabel = this.parser.formatLabel(
-                            track.trackFormat?.label || `Lane ${track.laneId}`,
-                            { laneId: track.laneId }
-                        );
-
-                        warpNode.innerHTML = `
-                            <div class="tree-node-header">
-                                <span class="tree-node-icon">◆</span>
-                                <span class="tree-node-label">${warpLabel}</span>
-                                <span class="tree-node-count">${track.events.length}</span>
-                            </div>
-                        `;
-                        warpNode.querySelector('.tree-node-header').addEventListener('click', () => {
-                            this.scrollToTrack(index);
+                        // Click to scroll to track?
+                        warpHeader.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            this.scrollToTrack(warp.trackIdx);
                         });
                     }
 
@@ -495,8 +554,18 @@ class TraceVisualizerApp {
         } else {
             // Pan
             this.renderer.pan(-e.deltaX, -e.deltaY);
-            this.canvasContainer.scrollTop = this.renderer.viewState.offsetY;
+            // Sync scroll positions
+            this.syncScrollPositions();
         }
+    }
+
+    /**
+     * Synchronize scroll positions of both containers
+     */
+    syncScrollPositions() {
+        const y = this.renderer.viewState.offsetY;
+        this.canvasContainer.scrollTop = y;
+        this.treeContainer.scrollTop = y;
     }
 
     /**
@@ -522,7 +591,7 @@ class TraceVisualizerApp {
             const dx = e.clientX - this.lastMouseX;
             const dy = e.clientY - this.lastMouseY;
             this.renderer.pan(dx, dy);
-            this.canvasContainer.scrollTop = this.renderer.viewState.offsetY;
+            this.syncScrollPositions();
             this.lastMouseX = e.clientX;
             this.lastMouseY = e.clientY;
         } else {
@@ -530,21 +599,48 @@ class TraceVisualizerApp {
             const hit = this.renderer.hitTest(x, y);
 
             if (hit) {
-                this.renderer.hoveredEvent = hit.event;
-                this.renderer.hoveredTrack = hit.trackIdx;
-                this.showTooltip(e.clientX, e.clientY, hit);
+                this.renderer.hoveredEvent = hit.event || null;
+                this.renderer.hoveredTrack = hit.trackIdx || null;
+                this.renderer.hoveredRowIdx = hit.rowIndex !== undefined ? hit.rowIndex : null;
+
+                if (hit.event) {
+                    this.showTooltip(e.clientX, e.clientY, hit);
+                } else {
+                    this.hideTooltip();
+                }
             } else {
                 this.renderer.hoveredEvent = null;
                 this.renderer.hoveredTrack = null;
+                this.renderer.hoveredRowIdx = null;
                 this.hideTooltip();
             }
 
             this.renderer.requestRender();
+            this.syncTreeHover();
 
             // Update cursor time
             if (this.trace) {
                 const time = this.renderer.xToTime(x);
                 this.cursorTime.textContent = this.renderer.formatTime(time - this.trace.timeRange.min);
+            }
+        }
+    }
+
+    /**
+     * Synchronize hover state with the tree view
+     */
+    syncTreeHover() {
+        const rowIdx = this.renderer.hoveredRowIdx;
+        const headers = this.treeContainer.querySelectorAll('.tree-node-header');
+
+        // Remove existing highlights
+        headers.forEach(h => h.classList.remove('hovered'));
+
+        if (rowIdx !== null && rowIdx !== undefined) {
+            // This is a bit expensive, but find the header matching the physical index
+            // In a production app, we would cache this mapping.
+            if (headers[rowIdx]) {
+                headers[rowIdx].classList.add('hovered');
             }
         }
     }
@@ -619,6 +715,25 @@ class TraceVisualizerApp {
         );
         this.tooltipHeader.textContent = label;
 
+        // Calculate grid coordinates
+        const blockId = track.blockId;
+        const dims = this.trace.gridDims;
+        const bx = blockId % dims.x;
+        const by = Math.floor((blockId % (dims.x * dims.y)) / dims.x);
+        const bz = Math.floor(blockId / (dims.x * dims.y));
+
+        // Calculate cluster coordinates
+        const clusterId = track.block?.clusterId ?? 0;
+        const g = this.trace.gridDims;
+        const c = this.trace.clusterDims;
+        // Number of clusters in each dimension
+        const ncx = Math.max(1, g.x / c.x);
+        const ncy = Math.max(1, g.y / c.y);
+
+        const cx = clusterId % ncx;
+        const cy = Math.floor((clusterId % (ncx * ncy)) / ncx);
+        const cz = Math.floor(clusterId / (ncx * ncy));
+
         // Format body
         let body = `
             <div class="tooltip-row">
@@ -630,35 +745,18 @@ class TraceVisualizerApp {
                 <span class="tooltip-value">${this.renderer.formatTime(hit.event.start - this.trace.timeRange.min)}</span>
             </div>
             <div class="tooltip-row">
-                <span class="tooltip-label">Block:</span>
-                <span class="tooltip-value">${track.blockId}</span>
+                <span class="tooltip-label">Grid:</span>
+                <span class="tooltip-value">(${bx}, ${by}, ${bz})</span>
             </div>
             <div class="tooltip-row">
                 <span class="tooltip-label">Cluster:</span>
-                <span class="tooltip-value">${track.block?.clusterId ?? '0'}</span>
+                <span class="tooltip-value">(${cx}, ${cy}, ${cz})</span>
             </div>
             <div class="tooltip-row">
                 <span class="tooltip-label">Lane:</span>
                 <span class="tooltip-value">${track.laneId}</span>
             </div>
-            <div class="tooltip-row">
-                <span class="tooltip-label">SM:</span>
-                <span class="tooltip-value">${track.block?.smId ?? '?'}</span>
-            </div>
         `;
-
-        // Add parameters if any
-        if (event.params && event.params.length > 0) {
-            body += `<div class="tooltip-row" style="margin-top: 8px; border-top: 1px solid #30363d; padding-top: 8px;">
-                <span class="tooltip-label">Parameters:</span>
-            </div>`;
-            for (let i = 0; i < event.params.length; i++) {
-                body += `<div class="tooltip-row">
-                    <span class="tooltip-label">{${i}}:</span>
-                    <span class="tooltip-value">${event.params[i]} (0x${event.params[i].toString(16)})</span>
-                </div>`;
-            }
-        }
 
         this.tooltipBody.innerHTML = body;
 

@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>cutedsl-trace Visualizer</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=32">
 </head>
 
 <body>
@@ -39,9 +39,6 @@
         <main class="main-content">
             <!-- Sidebar with block/track tree -->
             <aside class="sidebar" id="sidebar">
-                <div class="sidebar-header">
-                    <h2>Trace Structure</h2>
-                </div>
                 <div class="tree-container" id="tree-container">
                     <p class="placeholder-text">Load a .nanotrace file to view</p>
                 </div>
@@ -90,8 +87,6 @@
                 <span class="info-value" id="info-cluster">-</span>
             </div>
             <div class="info-overlay-row">
-                <span class="info-label">SMs:</span>
-                <span class="info-value" id="info-sms">-</span>
                 <span class="info-separator">|</span>
                 <span class="info-label">Blocks:</span>
                 <span class="info-value" id="info-blocks">-</span>
@@ -110,9 +105,9 @@
     </div>
 
     <script src="pako.min.js"></script>
-    <script src="parser.js?v=26"></script>
-    <script src="renderer.js?v=26"></script>
-    <script src="app.js?v=26"></script>
+    <script src="parser.js?v=32"></script>
+    <script src="renderer.js?v=32"></script>
+    <script src="app.js?v=32"></script>
 </body>
 
 </html>
