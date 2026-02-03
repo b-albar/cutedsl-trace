@@ -8,6 +8,7 @@ the resulting .nanotrace file after execution.
 
 from __future__ import annotations
 
+import json
 import struct
 import zlib
 from dataclasses import dataclass, field
@@ -588,26 +589,23 @@ class TraceWriter:
 
         self.tensors.append(builder)
 
-    def write(self, filename: str, compress: bool = True) -> None:
-        """Write the trace file.
+    def _collect_and_parse(
+        self,
+    ) -> tuple[list[ParsedBlock], list[ParsedTrack]]:
+        """Copy device buffers to host, parse events, and normalize times.
 
-        Args:
-            filename: Output filename (should end with .nanotrace)
-            compress: Whether to use deflate compression (default True)
+        Returns:
+            Tuple of (blocks, tracks) with normalized event times.
+
+        Raises:
+            ValueError: If no tensors added or block type not set.
         """
-        if is_tracing_disabled():
-            print(
-                f"Tracing is disabled (CUTEDSL_TRACE_DISABLED). Skipping write to {filename}"
-            )
-            return
-
         if not self.tensors:
             raise ValueError("No tensors added to writer")
 
         if self.block_type is None:
             raise ValueError("Block type not set. Call set_block_type() first.")
 
-        # Copy device buffers to host and parse events
         all_blocks: list[ParsedBlock] = []
         all_tracks: list[ParsedTrack] = []
         lane_offset = 0
@@ -632,13 +630,27 @@ class TraceWriter:
                 fmt_desc = self.format_descriptors.get(event.format_id)
                 if fmt_desc is not None:
                     event.params = event.params[: fmt_desc.param_count]
-                else:
-                    # If format is unknown, keep them as is (should not happen)
-                    pass
 
         # Set block format ID
         for block in all_blocks:
             block.format_id = self.block_type.id
+
+        return all_blocks, all_tracks
+
+    def write(self, filename: str, compress: bool = True) -> None:
+        """Write the trace file.
+
+        Args:
+            filename: Output filename (should end with .nanotrace)
+            compress: Whether to use deflate compression (default True)
+        """
+        if is_tracing_disabled():
+            print(
+                f"Tracing is disabled (CUTEDSL_TRACE_DISABLED). Skipping write to {filename}"
+            )
+            return
+
+        all_blocks, all_tracks = self._collect_and_parse()
 
         # Build format descriptor mapping (original ID -> file index)
         sorted_descriptors = sorted(
@@ -669,10 +681,109 @@ class TraceWriter:
                     f, sorted_descriptors, all_blocks, all_tracks, id_to_file_index
                 )
 
-        # Log statistics
-        total_events = sum(len(t.events) for t in all_tracks)
-        if total_events > 0:
-            pass
+    def write_perfetto(self, filename: str) -> None:
+        """Write trace data as Chrome JSON Trace Event format for Perfetto.
+
+        Exports the trace as a JSON file compatible with Perfetto UI
+        (https://ui.perfetto.dev) and Chrome's chrome://tracing.
+
+        Mapping:
+            - Kernel → process (pid=0)
+            - Each (block, lane) pair → thread (unique tid)
+            - Events → complete events (ph="X")
+
+        Args:
+            filename: Output filename (typically .json)
+        """
+        if is_tracing_disabled():
+            print(
+                f"Tracing is disabled (CUTEDSL_TRACE_DISABLED). Skipping write to {filename}"
+            )
+            return
+
+        all_blocks, all_tracks = self._collect_and_parse()
+
+        # Build block_id -> sm_id lookup
+        block_sm_ids: dict[int, int] = {}
+        for block in all_blocks:
+            block_sm_ids[block.block_id] = block.sm_id
+
+        # Build format_id -> label lookup
+        format_labels: dict[int, str] = {}
+        for desc in self.format_descriptors.values():
+            format_labels[desc.id] = desc.label_string
+
+        trace_events: list[dict] = []
+
+        # Process metadata event
+        trace_events.append(
+            {
+                "ph": "M",
+                "pid": 0,
+                "tid": 0,
+                "name": "process_name",
+                "args": {"name": self.kernel_name},
+            }
+        )
+
+        # Assign unique tid per (block_id, lane_id) and emit events
+        tid_counter = 0
+        for track in all_tracks:
+            tid = tid_counter
+            tid_counter += 1
+
+            # Resolve track label
+            track_fmt = self.format_descriptors.get(track.track_type_id)
+            if track_fmt:
+                track_label = track_fmt.label_string.replace(
+                    "{lane}", str(track.lane_id)
+                )
+            else:
+                track_label = f"Lane {track.lane_id}"
+
+            thread_name = f"Block {track.block_id} / {track_label}"
+
+            # Thread metadata
+            trace_events.append(
+                {
+                    "ph": "M",
+                    "pid": 0,
+                    "tid": tid,
+                    "name": "thread_name",
+                    "args": {"name": thread_name},
+                }
+            )
+
+            sm_id = block_sm_ids.get(track.block_id, 0)
+
+            for event in track.events:
+                # Resolve event name from format descriptor
+                event_label = format_labels.get(event.format_id, f"Event {event.format_id}")
+
+                event_args: dict[str, Any] = {
+                    "block_id": track.block_id,
+                    "lane_id": track.lane_id,
+                    "sm_id": sm_id,
+                }
+                if event.params:
+                    for i, p in enumerate(event.params):
+                        event_args[f"param{i}"] = p
+
+                trace_events.append(
+                    {
+                        "name": event_label,
+                        "ph": "X",
+                        "ts": event.time_offset_ns / 1000.0,
+                        "dur": event.duration_ns / 1000.0,
+                        "pid": 0,
+                        "tid": tid,
+                        "cat": "gpu",
+                        "args": event_args,
+                    }
+                )
+
+        with open(filename, "w") as f:
+            json.dump(trace_events, f)
 
     def _write_header(self, f: BinaryIO, compress: bool) -> None:
         """Write file header (uncompressed)."""

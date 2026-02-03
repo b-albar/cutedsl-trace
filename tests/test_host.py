@@ -2,6 +2,8 @@
 Tests for cutedsl-trace host module.
 """
 
+import json
+import struct
 import pytest
 import numpy as np
 import tempfile
@@ -367,3 +369,172 @@ class TestHierarchicalTracks:
 
         assert len(warp_tracks) == 1
         assert len(thread_tracks) == 32
+
+
+def _make_numpy_buffer(builder):
+    """Replace the builder's GPU buffer with a numpy buffer for testing."""
+    if hasattr(builder._buffer, "cpu"):
+        size = builder._buffer.shape[0]
+        builder._buffer = np.zeros(size, dtype=np.uint8)
+
+
+def _inject_events(builder, block_id, lane_id, events):
+    """Inject synthetic events into a trace builder's numpy buffer.
+
+    Each event is a tuple of (start_ns, end_ns).
+    Call _make_numpy_buffer() first if the builder uses a CUDA buffer.
+    """
+    buf = builder._buffer
+
+    num_lanes = builder.num_lanes
+    row_stride = builder.row_stride_bytes
+
+    if isinstance(builder, StaticTraceBuilder):
+        ew = builder.max_event_width
+    else:
+        ew = DynamicTraceBuilder.EVENT_WIDTH
+
+    ew_bytes = ew * 4
+    lane_base = (block_id * num_lanes + lane_id) * row_stride
+
+    # Write events starting after the header slot
+    write_offset = lane_base + ew_bytes
+    for start_ns, end_ns in events:
+        if ew == 2:
+            data = struct.pack("<II", start_ns, end_ns)
+        elif ew == 4:
+            data = struct.pack("<IIII", start_ns, end_ns, 0, 0)
+        else:
+            data = struct.pack("<IIIIIIII", start_ns, end_ns, 0, 0, 0, 0, 0, 0)
+        buf[write_offset : write_offset + ew_bytes] = np.frombuffer(data, dtype=np.uint8)
+        write_offset += ew_bytes
+
+    # Write header: sm_id=42, write_offset_bytes=current position
+    header = struct.pack("<II", 42, write_offset)
+    buf[lane_base : lane_base + 8] = np.frombuffer(header, dtype=np.uint8)
+
+
+class TestWritePerfetto:
+    """Tests for TraceWriter.write_perfetto()."""
+
+    def setup_method(self):
+        TraceType.reset_counter()
+        BlockType.reset_counter()
+        TrackType.reset_counter()
+
+    def test_write_perfetto_basic(self):
+        """Test basic Perfetto JSON export with synthetic events."""
+        tt = TraceType("LoadA", "Load A", "Load matrix A", 0)
+        bt = BlockType("CTA", "Block {blockLinear}", "Block tooltip")
+        track = TrackType("Warp", "Warp {lane}", "Warp tooltip")
+
+        builder = StaticTraceBuilder(
+            num_lanes=2,
+            trace_types=[tt] * 2,
+            max_events_per_lane=10,
+            grid_dims=(2, 1, 1),
+        )
+        builder.set_track_type(track)
+        _make_numpy_buffer(builder)
+
+        # Inject events: block 0 lane 0, block 0 lane 1, block 1 lane 0
+        _inject_events(builder, 0, 0, [(1000, 2000), (3000, 4000)])
+        _inject_events(builder, 0, 1, [(1500, 2500)])
+        _inject_events(builder, 1, 0, [(2000, 3500)])
+
+        writer = TraceWriter("test_kernel")
+        writer.set_block_type(bt)
+        writer.add_tensor(builder)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "trace.json")
+            writer.write_perfetto(filepath)
+
+            with open(filepath, "r") as f:
+                data = json.load(f)
+
+        # Should be a list of events
+        assert isinstance(data, list)
+
+        # Separate metadata and trace events
+        meta_events = [e for e in data if e["ph"] == "M"]
+        trace_events = [e for e in data if e["ph"] == "X"]
+
+        # 1 process_name + thread_name per track (4 tracks with events)
+        process_names = [e for e in meta_events if e["name"] == "process_name"]
+        thread_names = [e for e in meta_events if e["name"] == "thread_name"]
+        assert len(process_names) == 1
+        assert process_names[0]["args"]["name"] == "test_kernel"
+        assert len(thread_names) >= 3  # at least 3 tracks with events
+
+        # Total of 4 trace events
+        assert len(trace_events) == 4
+
+        # All events should have required Perfetto fields
+        for event in trace_events:
+            assert "name" in event
+            assert "ts" in event
+            assert "dur" in event
+            assert "pid" in event
+            assert "tid" in event
+            assert event["cat"] == "gpu"
+            assert event["args"]["sm_id"] == 42
+
+        # Timestamps should be in microseconds (original ns / 1000)
+        # Min time is 1000ns, so first event should start at ts=0
+        first_event = min(trace_events, key=lambda e: e["ts"])
+        assert first_event["ts"] == 0.0
+
+    def test_write_perfetto_empty_trace(self):
+        """Test Perfetto export with no events."""
+        tt = TraceType("Test", "L", "T", 0)
+        bt = BlockType("Block", "B", "B")
+        track = TrackType("Track", "Lane", "Lane")
+
+        builder = StaticTraceBuilder(
+            num_lanes=1,
+            trace_types=[tt],
+            max_events_per_lane=10,
+            grid_dims=(1, 1, 1),
+        )
+        builder.set_track_type(track)
+
+        writer = TraceWriter("empty_kernel")
+        writer.set_block_type(bt)
+        writer.add_tensor(builder)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "trace.json")
+            writer.write_perfetto(filepath)
+
+            with open(filepath, "r") as f:
+                data = json.load(f)
+
+        # Only metadata, no trace events
+        trace_events = [e for e in data if e["ph"] == "X"]
+        assert len(trace_events) == 0
+
+    def test_write_perfetto_requires_tensors(self):
+        """Test that write_perfetto fails without tensors."""
+        writer = TraceWriter("test")
+        bt = BlockType("B", "B", "B")
+        writer.set_block_type(bt)
+
+        with pytest.raises(ValueError, match="No tensors"):
+            writer.write_perfetto("test.json")
+
+    def test_write_perfetto_requires_block_type(self):
+        """Test that write_perfetto fails without block type."""
+        writer = TraceWriter("test")
+        tt = TraceType("T", "L", "T", 0)
+
+        builder = StaticTraceBuilder(
+            num_lanes=1,
+            trace_types=[tt],
+            max_events_per_lane=10,
+            grid_dims=(1, 1, 1),
+        )
+        writer.add_tensor(builder)
+
+        with pytest.raises(ValueError, match="Block type"):
+            writer.write_perfetto("test.json")
