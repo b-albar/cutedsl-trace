@@ -15,6 +15,7 @@ from cutedsl_trace.host import (
     DynamicTraceBuilder,
     TraceWriter,
     create_hierarchical_tracks,
+    parse_events_from_buffer,
 )
 
 
@@ -412,6 +413,49 @@ def _inject_events(builder, block_id, lane_id, events):
     # Write header: sm_id=42, write_offset_bytes=current position
     header = struct.pack("<II", 42, write_offset)
     buf[lane_base : lane_base + 8] = np.frombuffer(header, dtype=np.uint8)
+
+
+def _inject_overflow_header(builder, block_id, lane_id, event_count):
+    """Write a lane header whose event count exceeds row capacity."""
+    buf = builder._buffer
+    row_stride = builder.row_stride_bytes
+    lane_base = (block_id * builder.num_lanes + lane_id) * row_stride
+    ew = (
+        builder.max_event_width
+        if isinstance(builder, StaticTraceBuilder)
+        else builder.EVENT_WIDTH
+    )
+    write_offset = lane_base + (event_count + 1) * ew * 4
+    header = struct.pack("<II", 42, write_offset)
+    buf[lane_base : lane_base + 8] = np.frombuffer(header, dtype=np.uint8)
+
+
+def test_parse_events_rejects_overflowed_static_lane_header():
+    tt = TraceType("LoadA", "Load A", "Load matrix A", 0)
+    builder = StaticTraceBuilder(
+        num_lanes=1,
+        trace_types=[tt],
+        max_events_per_lane=2,
+        grid_dims=(1, 1, 1),
+    )
+    _make_numpy_buffer(builder)
+    _inject_overflow_header(builder, 0, 0, event_count=3)
+
+    with pytest.raises(ValueError, match="Trace lane overflow: block=0, lane=0"):
+        parse_events_from_buffer(builder._buffer, builder)
+
+
+def test_parse_events_rejects_overflowed_dynamic_lane_header():
+    builder = DynamicTraceBuilder(
+        num_lanes=1,
+        max_events_per_lane=2,
+        grid_dims=(1, 1, 1),
+    )
+    _make_numpy_buffer(builder)
+    _inject_overflow_header(builder, 0, 0, event_count=3)
+
+    with pytest.raises(ValueError, match="events=3, capacity=2"):
+        parse_events_from_buffer(builder._buffer, builder)
 
 
 class TestWritePerfetto:

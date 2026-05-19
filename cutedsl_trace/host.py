@@ -391,6 +391,20 @@ def parse_events_from_buffer(
             if write_offset_bytes == 0:
                 continue
 
+            lane_end = lane_base + row_stride_bytes
+            if write_offset_bytes > lane_end:
+                event_capacity = max(0, row_stride_bytes // event_width_bytes - 1)
+                requested_events = max(
+                    0,
+                    (write_offset_bytes - (lane_base + event_width_bytes))
+                    // event_width_bytes,
+                )
+                raise ValueError(
+                    "Trace lane overflow: "
+                    f"block={block_id}, lane={lane_id}, "
+                    f"events={requested_events}, capacity={event_capacity}"
+                )
+
             if block_sm_id is None:
                 block_sm_id = sm_id
 

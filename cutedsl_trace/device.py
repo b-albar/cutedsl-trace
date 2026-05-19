@@ -785,7 +785,11 @@ def finish_lane(
     if lane.enabled:
         sm_id = read_smid()
         ptr = handle.buffer.iterator + lane.base_offset_bytes
-        store_global_wt_v2_u32(ptr, sm_id, Int32(lane.write_offset_bytes))
+        write_offset_bytes = lane.write_offset_bytes
+        max_offset = lane.base_offset_bytes + handle.row_stride_bytes
+        if write_offset_bytes > max_offset:
+            write_offset_bytes = max_offset
+        store_global_wt_v2_u32(ptr, sm_id, Int32(write_offset_bytes))
 
 
 @cute.jit
@@ -808,4 +812,8 @@ def finish_lane_dynamic(
     if lane.enabled:
         sm_id = read_smid()
         ptr = handle.buffer.iterator + lane.base_offset_bytes
-        store_global_wt_v2_u32(ptr, sm_id, Int32(lane.write_offset_bytes))
+        write_offset_bytes = lane.write_offset_bytes
+        max_offset = lane.base_offset_bytes + handle.row_stride_bytes
+        if write_offset_bytes > max_offset:
+            write_offset_bytes = max_offset
+        store_global_wt_v2_u32(ptr, sm_id, Int32(write_offset_bytes))
